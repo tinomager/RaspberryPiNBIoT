@@ -21,3 +21,5 @@ Also pySerial is required for serial communication with the NB IoT modem:
 ```
 pip3 install pyserial
 ```
+
+### Configuration
