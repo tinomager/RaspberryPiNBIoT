@@ -52,24 +52,67 @@ def get_dht_values(sensor_version, pin):
     temp, hum = Adafruit_DHT.read_retry(sensor_version, pin)
     return { "temp" : temp, "hum" : hum}
 
+def send_values(ser, valuejson):
+    print(f'Try to send JSON: {valuejson}')
+
 if __name__ == "__main__":
+    #parse config
     config = configparser.ConfigParser()
     config.read("config.ini")
-    
     serialport = config["serial"]["port"]
     baudrate = int(config["serial"]["baudrate"])
     sendintervall = int(config["common"]["send_intervall_seconds"])
     sensor = config["dht"]["dht_sensortype"] 
     pin = int(config["dht"]["dht_pin"])
+    apn_config = config["nbiot"]["apn"]
+    command_waittime_seconds = float(config["serial"]["command_waittime_seconds"])
+    
+    #check if modem is configured properly otherwise set correct values
     print("Started DHT22NBIoTSender script")
     ser = connect_serial(serialport, baudrate)
     print("Successfully created serial communication")
     if(send_serial_command(ser, "AT", "OK") == True):
         print("Succesfully initialized modem connection")
     else:
+        print("Modem was not correct initialized.")
         raise ConnectionError("Modem is not available")
+
+    #check if modem is set for NB IoT
+    if(send_serial_command(ser, 'AT+CBANDCFG?', '"NB-IOT",8') == True):
+        print("Modem was already configured for NB IoT")
+    else:
+        time.sleep(command_waittime_seconds)
+        if(send_serial_command(ser, 'AT+CBANDCFG="NB-IOT",8', 'OK') == True):
+            print("Modes is now configured for NB IoT")
+        else:
+            print("Cannot configure modem for NB IoT")
+            raise ConnectionError("Modem cannot be configured for NB IoT")
+        
+    #check and set APN
+    apn_cgdcont_value = f'1,"IP",{apn_config}'
+    if(send_serial_command(ser, 'AT+CGDCONT?', apn_cgdcont_value) == False):
+        time.sleep(command_waittime_seconds)
+        if(send_serial_command(ser, f'AT+CGDCONT={apn_cgdcont_value}', 'OK') == True):
+            print(f'Set APN to {apn_cgdcont_value}')
+        else:
+            print('Cannot set APN value')
+            raise ConnectionError("Modem APN cannot be configured like set in config.ini")
+
+    apn_cncfg = f'0,1,{apn_config}'
+    if(send_serial_command(ser, 'AT+CNCFG?', apn_cncfg) == True):
+        print('Modem APN was configured like in config.ini')
+    else:
+        time.sleep(command_waittime_seconds)
+        if(send_serial_command(ser, f'AT+CNCFG={apn_cncfg}', 'OK') == True):
+            print('Modem APN was configured like in config.ini')
+        else:
+            print('Cannot set APN value')
+            raise ConnectionError("Modem APN cannot be configured like set in config.ini")
 
     while True:
         dht_res = get_dht_values(sensor, pin)
         print("Read from DHT " + json.dumps(dht_res))
+        send_values(ser, dht_res)
+
+        #wait till the next run
         time.sleep(sendintervall)
