@@ -5,6 +5,7 @@ import json
 
 mock_DHT = True
 mock_serial = False
+command_waittime_seconds = 0.1
 
 if(mock_DHT == False):
     import Adafruit_DHT
@@ -27,6 +28,19 @@ def send_serial_command(ser, command, expected_returnvalue = None):
     if(mock_serial == True):
         return True
 
+    response = send_serial_command_with_returnvalue(ser, command)   
+    
+    if(expected_returnvalue is not None):
+        if not(response.__contains__(expected_returnvalue)):
+            print("Sent command " + command + " and expected return value " + expected_returnvalue + " but got " + response)
+            return False
+    
+    return True
+
+def send_serial_command_with_returnvalue(ser, command):
+    if(mock_serial):
+        return None
+    
     print("Writing to serial: " + command)
     commandbytes = (command + '\r').encode('utf-8')
     ser.write(commandbytes)
@@ -38,13 +52,28 @@ def send_serial_command(ser, command, expected_returnvalue = None):
         response += responsebytes.decode('utf-8')
         quantity = ser.in_waiting
     print("Got response from serial: " + response)
-    
-    if(expected_returnvalue is not None):
-        if not(response.__contains__(expected_returnvalue)):
-            print("Sent command " + command + " and expected return value " + expected_returnvalue + " but got " + response)
-            return False
-    
-    return True
+    time.sleep(command_waittime_seconds)
+    return response
+
+def get_signal_status(ser):
+    retry = 3
+    while retry > 0:
+        csq = send_serial_command_with_returnvalue(ser, 'AT+CSQ')
+        if csq.lower() == "error":
+            retry -= 1
+
+            if retry == 0:
+                print("Cannot get signal strength")
+                raise ConnectionError("Modem not connected to network")
+
+            continue
+        else:
+            try:
+                csq_parts = csq.split(':')
+                csq_value = csq_parts[1].split(',')[0]
+                return csq_value
+            except:
+                continue
 
 def get_dht_values(sensor_version, pin):
     if(mock_DHT == True):
@@ -54,6 +83,32 @@ def get_dht_values(sensor_version, pin):
 
 def send_values(ser, valuejson):
     print(f'Try to send JSON: {valuejson}')
+    hexstring = valuejson.hex()
+
+
+def set_modem_configuration(ser):
+    #set NB IOT
+    if(send_serial_command(ser, 'AT+CBANDCFG="NB-IOT",8', 'OK') == True):
+        print("Modes is now configured for NB IoT")
+    else:
+        print("Cannot configure modem for NB IoT")
+        raise ConnectionError("Modem cannot be configured for NB IoT")
+        
+    #set APN
+    apn_cgdcont_value = f'1,"IP","{apn_config}"'
+    if(send_serial_command(ser, f'AT+CGDCONT={apn_cgdcont_value}', 'OK') == True):
+        print(f'Set APN to {apn_cgdcont_value}')
+    else:
+        print('Cannot set APN value')
+        raise ConnectionError("Modem APN cannot be configured like set in config.ini")
+
+    apn_cncfg = f'0,1,"{apn_config}"'
+    if(send_serial_command(ser, f'AT+CNCFG={apn_cncfg}', 'OK') == True):
+        print('Modem APN was configured like in config.ini')
+    else:
+        print('Cannot set APN value')
+        raise ConnectionError("Modem APN cannot be configured like set in config.ini")
+
 
 if __name__ == "__main__":
     #parse config
@@ -66,6 +121,9 @@ if __name__ == "__main__":
     pin = int(config["dht"]["dht_pin"])
     apn_config = config["nbiot"]["apn"]
     command_waittime_seconds = float(config["serial"]["command_waittime_seconds"])
+    set_operator = (config["nbiot"]["set_operator"]).lower() == 'true'
+    udp_ip_address = config["nbiot"]["udp_ip_address"]
+    udp_port = config["nbiot"]["udp_port"]
     
     #check if modem is configured properly otherwise set correct values
     print("Started DHT22NBIoTSender script")
@@ -77,38 +135,28 @@ if __name__ == "__main__":
         print("Modem was not correct initialized.")
         raise ConnectionError("Modem is not available")
 
-    #check if modem is set for NB IoT
-    if(send_serial_command(ser, 'AT+CBANDCFG?', '"NB-IOT",8') == True):
-        print("Modem was already configured for NB IoT")
-    else:
-        time.sleep(command_waittime_seconds)
-        if(send_serial_command(ser, 'AT+CBANDCFG="NB-IOT",8', 'OK') == True):
-            print("Modes is now configured for NB IoT")
-        else:
-            print("Cannot configure modem for NB IoT")
-            raise ConnectionError("Modem cannot be configured for NB IoT")
-        
-    #check and set APN
-    apn_cgdcont_value = f'1,"IP",{apn_config}'
-    if(send_serial_command(ser, 'AT+CGDCONT?', apn_cgdcont_value) == False):
-        time.sleep(command_waittime_seconds)
-        if(send_serial_command(ser, f'AT+CGDCONT={apn_cgdcont_value}', 'OK') == True):
-            print(f'Set APN to {apn_cgdcont_value}')
-        else:
-            print('Cannot set APN value')
-            raise ConnectionError("Modem APN cannot be configured like set in config.ini")
+    if set_operator == True:
+        set_modem_configuration(ser)
 
-    apn_cncfg = f'0,1,{apn_config}'
-    if(send_serial_command(ser, 'AT+CNCFG?', apn_cncfg) == True):
-        print('Modem APN was configured like in config.ini')
-    else:
-        time.sleep(command_waittime_seconds)
-        if(send_serial_command(ser, f'AT+CNCFG={apn_cncfg}', 'OK') == True):
-            print('Modem APN was configured like in config.ini')
-        else:
-            print('Cannot set APN value')
-            raise ConnectionError("Modem APN cannot be configured like set in config.ini")
-
+    #check network connection
+    if(send_serial_command(ser, "AT+CGATT?", "1") != True):
+        print("Modem is not connected to the network")
+        raise ConnectionError("Modem is not connected to the network")
+    
+    #check signal status
+    csq = get_signal_status(ser)
+    print(f'Modem network connected. Signal strength: {csq}')
+    
+    #connect to UDP server
+    if(send_serial_command(ser, 'AT+CACID=0,1', '0,ACTIVE') != True):
+        print("Cannot open PDP mode")
+        raise ConnectionError("Cannot open PDP port for UDP communication")
+    
+    caopen_command = f'0,0,"UDP","{udp_ip_address}",{udp_port}'
+    if(send_serial_command(ser, f'AT+CAOPEN={caopen_command}', 'OK') != True):
+        print("Cannot connect to UDP server")
+        raise ConnectionError("Cannot open UDP connection")
+    
     while True:
         dht_res = get_dht_values(sensor, pin)
         print("Read from DHT " + json.dumps(dht_res))
