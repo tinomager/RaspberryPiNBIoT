@@ -37,6 +37,30 @@ def send_serial_command(ser, command, expected_returnvalue = None):
     
     return True
 
+def send_serial_commands(ser, commands):
+    if(mock_serial):
+        return None
+    
+    for command in commands:
+        print("Writing to serial: " + command)
+        commandbytes = (command + '\r').encode('utf-8')
+        time.sleep(command_waittime_seconds)
+        ser.write(commandbytes)
+
+    response = get_response_from_serial(ser)
+    time.sleep(command_waittime_seconds)
+    return response
+
+def get_response_from_serial(ser):
+    response = ""
+    quantity = 1
+    while quantity > 0:
+        responsebytes = ser.readline()
+        response += responsebytes.decode('utf-8')
+        quantity = ser.in_waiting
+    print("Got response from serial: " + response)
+    return response
+
 def send_serial_command_with_returnvalue(ser, command):
     if(mock_serial):
         return None
@@ -45,13 +69,7 @@ def send_serial_command_with_returnvalue(ser, command):
     commandbytes = (command + '\r').encode('utf-8')
     ser.write(commandbytes)
 
-    response = ""
-    quantity = 1
-    while quantity > 0:
-        responsebytes = ser.readline()
-        response += responsebytes.decode('utf-8')
-        quantity = ser.in_waiting
-    print("Got response from serial: " + response)
+    response = get_response_from_serial(ser)
     time.sleep(command_waittime_seconds)
     return response
 
@@ -66,6 +84,7 @@ def get_signal_status(ser):
                 print("Cannot get signal strength")
                 raise ConnectionError("Modem not connected to network")
 
+            time.sleep(1)
             continue
         else:
             try:
@@ -73,6 +92,7 @@ def get_signal_status(ser):
                 csq_value = csq_parts[1].split(',')[0]
                 return csq_value
             except:
+                time.sleep(1)
                 continue
 
 def get_dht_values(sensor_version, pin):
@@ -83,8 +103,14 @@ def get_dht_values(sensor_version, pin):
 
 def send_values(ser, valuejson):
     print(f'Try to send JSON: {valuejson}')
-    hexstring = valuejson.hex()
-
+    hexstring = ''.join([hex(ord(c))[2:] for c in valuejson])
+    hexlength = len(hexstring)
+    commands = [f'AT+CASEND=0,{hexlength}', hexstring]
+    response = send_serial_commands(ser, commands)
+    if not(response.__contains__('OK')):
+        return False
+    
+    return True
 
 def set_modem_configuration(ser):
     #set NB IOT
@@ -109,6 +135,21 @@ def set_modem_configuration(ser):
         print('Cannot set APN value')
         raise ConnectionError("Modem APN cannot be configured like set in config.ini")
 
+def connect_upd(ser):
+     #connect to UDP server
+    if(send_serial_command(ser, 'AT+CACID=0,1', '0,ACTIVE') != True):
+        print("Cannot open PDP mode")
+        raise ConnectionError("Cannot open PDP port for UDP communication")
+    
+    caopen_command = f'0,0,"UDP","{udp_ip_address}",{udp_port}'
+    if(send_serial_command(ser, f'AT+CAOPEN={caopen_command}', 'OK') != True):
+        print("Cannot connect to UDP server")
+        raise ConnectionError("Cannot open UDP connection")
+
+def disconnect_udp(ser):
+    if(send_serial_command(ser, 'AT+CACLOSE=0', 'OK') != True):
+        print("Cannot close UDP port")
+        raise ConnectionError("Cannot close UDP port")
 
 if __name__ == "__main__":
     #parse config
@@ -143,24 +184,25 @@ if __name__ == "__main__":
         print("Modem is not connected to the network")
         raise ConnectionError("Modem is not connected to the network")
     
-    #check signal status
-    csq = get_signal_status(ser)
-    print(f'Modem network connected. Signal strength: {csq}')
-    
-    #connect to UDP server
-    if(send_serial_command(ser, 'AT+CACID=0,1', '0,ACTIVE') != True):
-        print("Cannot open PDP mode")
-        raise ConnectionError("Cannot open PDP port for UDP communication")
-    
-    caopen_command = f'0,0,"UDP","{udp_ip_address}",{udp_port}'
-    if(send_serial_command(ser, f'AT+CAOPEN={caopen_command}', 'OK') != True):
-        print("Cannot connect to UDP server")
-        raise ConnectionError("Cannot open UDP connection")
-    
     while True:
+        try:
+            #check signal status
+            csq = get_signal_status(ser)
+            print(f'Modem network connected. Signal strength: {csq}')
+
+            connect_upd(ser)
+            print('Connected to UDP server. Ready to send.')
+        except:
+            time.sleep(1)
+            continue
+
         dht_res = get_dht_values(sensor, pin)
         print("Read from DHT " + json.dumps(dht_res))
-        send_values(ser, dht_res)
+        
+        waittime = 0.1
+        if send_values(ser, dht_res):
+            waittime = sendintervall
+        disconnect_udp(ser)
 
         #wait till the next run
-        time.sleep(sendintervall)
+        time.sleep(waittime)
